@@ -1,0 +1,7 @@
+pytesseract
+opencv-python-headless
+onnxruntime
+fastapi
+uvicorn
+numpy
+python-multipart
