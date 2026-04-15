@@ -33,3 +33,8 @@ coverage/
 # Logs
 *.log
 npm-debug.log*
+
+# Generated output & temp uploads (never commit these)
+app/output/
+app/temp_videos/
+temp_videos/
