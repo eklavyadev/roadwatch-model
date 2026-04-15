@@ -196,6 +196,7 @@ async def analyze_video(file: UploadFile = File(...)):
                 # Better shot of the same pothole — upgrade
                 candidate_potholes[matched_idx] = record
 
+        # Write frame after all annotations (boxes + GPS text) are drawn
         writer.write(annotated)
 
     cap.release()
