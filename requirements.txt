@@ -5,3 +5,4 @@ fastapi
 uvicorn
 numpy
 python-multipart
+ultralytics
