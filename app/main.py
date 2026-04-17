@@ -10,7 +10,18 @@ import json
 import math
 import asyncio
 import threading
+import logging
+import time
 from ultralytics import YOLO
+
+# ================= LOGGING ================= #
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("roadwatch")
 
 # ================= APP ================= #
 
@@ -37,7 +48,9 @@ OUTPUT_DIR = "app/output"
 os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+log.info("Loading YOLO model from %s …", MODEL_PATH)
 model = YOLO(MODEL_PATH)
+log.info("YOLO model loaded ✓")
 
 # ================= TASK STORE ================= #
 # task_id -> { status, progress, total_frames, potholes_found, result, error }
@@ -110,9 +123,13 @@ def best_box(boxes):
 
 def process_video(task_id: str, temp_path: str):
     """Runs in a background thread. Updates tasks[task_id] as it goes."""
+    start_time = time.time()
+    log.info("[%s] Processing started  →  %s", task_id[:8], os.path.basename(temp_path))
+
     try:
         cap = cv2.VideoCapture(temp_path)
         if not cap.isOpened():
+            log.error("[%s] Could not open video file", task_id[:8])
             tasks[task_id]["status"] = "error"
             tasks[task_id]["error"] = "Could not open video"
             return
@@ -122,6 +139,12 @@ def process_video(task_id: str, temp_path: str):
         h          = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         total      = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 1
         ocr_y      = int(h * 0.75)
+        duration_s = round(total / fps, 1)
+
+        log.info(
+            "[%s] Video info  →  %dx%d  |  %.1f fps  |  %d frames  |  ~%ss",
+            task_id[:8], w, h, fps, total, duration_s
+        )
 
         tasks[task_id]["total_frames"] = total
 
@@ -135,6 +158,8 @@ def process_video(task_id: str, temp_path: str):
 
         candidate_potholes: list[dict] = []
         frame_idx = 0
+        ocr_hits = 0
+        filtered_boxes = 0
 
         while True:
             ret, frame = cap.read()
@@ -165,6 +190,7 @@ def process_video(task_id: str, temp_path: str):
                 # Reject false positives that span too much of the frame
                 # Real potholes don't cover more than 60% of width OR height
                 if (x2 - x1) > w * 0.6 or (y2 - y1) > h * 0.6:
+                    filtered_boxes += 1
                     continue
 
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
@@ -177,6 +203,7 @@ def process_video(task_id: str, temp_path: str):
             lat, lon = extract_lat_lon(frame)
 
             if lat is not None:
+                ocr_hits += 1
                 cv2.putText(
                     annotated, f"Lat:{lat}  Lon:{lon}",
                     (10, h - 20),
@@ -186,8 +213,8 @@ def process_video(task_id: str, temp_path: str):
             # Only consider boxes that passed the size filter
             valid_boxes = [
                 b for b in results[0].boxes
-                if not ((int(b.xyxy[0][2]) - int(b.xyxy[0][0])) > w * 0.7
-                        and (int(b.xyxy[0][3]) - int(b.xyxy[0][1])) > h * 0.7)
+                if not ((int(b.xyxy[0][2]) - int(b.xyxy[0][0])) > w * 0.6
+                        or  (int(b.xyxy[0][3]) - int(b.xyxy[0][1])) > h * 0.6)
             ]
 
             if valid_boxes and lat is not None and lon is not None:
@@ -212,7 +239,16 @@ def process_video(task_id: str, temp_path: str):
 
                 if matched_idx is None:
                     candidate_potholes.append(record)
+                    log.info(
+                        "[%s] New pothole #%d  →  lat=%.5f  lon=%.5f  conf=%.2f  t=%.1fs",
+                        task_id[:8], len(candidate_potholes), lat, lon, top_conf, time_sec
+                    )
                 elif top_conf > candidate_potholes[matched_idx]["confidence"]:
+                    log.info(
+                        "[%s] Updated pothole #%d  →  conf %.2f → %.2f",
+                        task_id[:8], matched_idx + 1,
+                        candidate_potholes[matched_idx]["confidence"], top_conf
+                    )
                     candidate_potholes[matched_idx] = record
 
             writer.write(annotated)
@@ -221,9 +257,15 @@ def process_video(task_id: str, temp_path: str):
             tasks[task_id]["progress"]       = frame_idx
             tasks[task_id]["potholes_found"] = len(candidate_potholes)
 
+            # Log progress every 10%
+            pct = round(frame_idx / total * 100)
+            if pct % 10 == 0 and frame_idx % max(1, total // 10) < 2:
+                log.info("[%s] Progress  →  %d%%  (%d/%d frames)", task_id[:8], pct, frame_idx, total)
+
         cap.release()
         writer.release()
         os.remove(temp_path)
+        log.info("[%s] Temp file deleted  →  %s", task_id[:8], os.path.basename(temp_path))
 
         potholes = [{"id": i + 1, **p} for i, p in enumerate(candidate_potholes)]
         result = {
@@ -236,12 +278,20 @@ def process_video(task_id: str, temp_path: str):
         json_path = output_path.replace(".mp4", ".json")
         with open(json_path, "w") as f:
             json.dump(result, f, indent=2)
+        log.info("[%s] JSON report saved  →  %s", task_id[:8], json_path)
 
         result["json_file"] = json_path
         tasks[task_id]["result"] = result
         tasks[task_id]["status"] = "done"
 
+        elapsed = round(time.time() - start_time, 1)
+        log.info(
+            "[%s] ✅ Done  →  %d frames  |  %d potholes  |  %d OCR hits  |  %d boxes filtered  |  %.1fs elapsed",
+            task_id[:8], frame_idx, len(potholes), ocr_hits, filtered_boxes, elapsed
+        )
+
     except Exception as e:
+        log.exception("[%s] ❌ Unexpected error: %s", task_id[:8], str(e))
         tasks[task_id]["status"] = "error"
         tasks[task_id]["error"]  = str(e)
 
@@ -252,22 +302,31 @@ def process_video(task_id: str, temp_path: str):
 async def analyze_video(file: UploadFile = File(...)):
     """Upload a video. Returns a task_id immediately — poll /progress/{task_id} for updates."""
 
-    temp_path = os.path.join(TEMP_DIR, f"{uuid.uuid4()}_{file.filename}")
-    with open(temp_path, "wb") as f:
-        f.write(await file.read())
+    task_id   = str(uuid.uuid4())
+    temp_path = os.path.join(TEMP_DIR, f"{task_id}_{file.filename}")
 
-    task_id = str(uuid.uuid4())
+    log.info("📥 Upload received  →  filename='%s'  task_id=%s", file.filename, task_id[:8])
+
+    content = await file.read()
+    size_mb  = round(len(content) / (1024 * 1024), 2)
+
+    with open(temp_path, "wb") as f:
+        f.write(content)
+
+    log.info("💾 Buffered to disk  →  %s  (%.2f MB)", os.path.basename(temp_path), size_mb)
+
     tasks[task_id] = {
-        "status":        "processing",
-        "progress":      0,
-        "total_frames":  0,
+        "status":         "processing",
+        "progress":       0,
+        "total_frames":   0,
         "potholes_found": 0,
-        "result":        None,
-        "error":         None,
+        "result":         None,
+        "error":          None,
     }
 
     thread = threading.Thread(target=process_video, args=(task_id, temp_path), daemon=True)
     thread.start()
+    log.info("🚀 Processing thread started  →  task_id=%s", task_id[:8])
 
     return {"task_id": task_id}
 
@@ -277,19 +336,16 @@ async def progress(task_id: str):
     """
     Server-Sent Events stream.
     Emits a JSON event every 500 ms until processing is done or errored.
-
-    Event shape while processing:
-      { status, progress, total_frames, potholes_found, percent }
-
-    Final event on completion:
-      { status: "done", result: { ... } }
     """
     if task_id not in tasks:
+        log.warning("Progress requested for unknown task_id=%s", task_id[:8])
         raise HTTPException(status_code=404, detail="Task not found")
+
+    log.info("📡 SSE stream opened  →  task_id=%s", task_id[:8])
 
     async def event_stream():
         while True:
-            task = tasks[task_id]
+            task    = tasks[task_id]
             total   = task["total_frames"] or 1
             percent = round(task["progress"] / total * 100)
 
@@ -301,11 +357,13 @@ async def progress(task_id: str):
                     "result":         task["result"],
                 }
                 yield f"data: {json.dumps(payload)}\n\n"
+                log.info("📡 SSE stream closed (done)  →  task_id=%s", task_id[:8])
                 break
 
             if task["status"] == "error":
                 payload = {"status": "error", "error": task["error"]}
                 yield f"data: {json.dumps(payload)}\n\n"
+                log.error("📡 SSE stream closed (error)  →  task_id=%s  error=%s", task_id[:8], task["error"])
                 break
 
             payload = {
@@ -322,9 +380,9 @@ async def progress(task_id: str):
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
+            "Cache-Control":         "no-cache",
+            "X-Accel-Buffering":     "no",
             "X-Content-Type-Options": "nosniff",
-            "Transfer-Encoding": "chunked",
+            "Transfer-Encoding":     "chunked",
         },
     )
