@@ -73,16 +73,13 @@ def extract_lat_lon(frame):
 
     try:
         if lat_match and lon_match:
-            lat = float(clean_number(lat_match.group(1)))
-            lon = float(clean_number(lon_match.group(2)))
+            lat = abs(float(clean_number(lat_match.group(1))))
+            lon = abs(float(clean_number(lon_match.group(2))))
 
-            # Reject obviously malformed values (dropped decimal point, stray sign, etc.)
-            if not (-90.0 <= lat <= 90.0):
+            # India bounding box — rejects OCR garbage like 0.26 or 260.8
+            if not (6.0 <= lat <= 38.0):
                 return None, None
-            if not (-180.0 <= lon <= 180.0):
-                return None, None
-            # Zero coords mean OCR produced garbage
-            if lat == 0.0 or lon == 0.0:
+            if not (68.0 <= lon <= 98.0):
                 return None, None
 
             return lat, lon
@@ -165,9 +162,9 @@ def process_video(task_id: str, temp_path: str):
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
                 conf = float(box.conf[0])
 
-                # Reject whole-frame false positives — real potholes don't span
-                # more than 70% of both the frame width and height simultaneously
-                if (x2 - x1) > w * 0.7 and (y2 - y1) > h * 0.7:
+                # Reject false positives that span too much of the frame
+                # Real potholes don't cover more than 60% of width OR height
+                if (x2 - x1) > w * 0.6 or (y2 - y1) > h * 0.6:
                     continue
 
                 cv2.rectangle(annotated, (x1, y1), (x2, y2), (0, 0, 255), 2)
