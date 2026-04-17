@@ -12,6 +12,7 @@ import asyncio
 import threading
 import logging
 import time
+import numpy as np
 from ultralytics import YOLO
 
 # ================= LOGGING ================= #
@@ -73,12 +74,28 @@ def extract_lat_lon(frame):
     h, w, _ = frame.shape
     crop = frame[int(h * 0.75):h, 0:w]
 
+    # 1. Upscale 3x — gives Tesseract bigger, clearer digits (0 vs 8 confusion fix)
+    ch, cw = crop.shape[:2]
+    crop = cv2.resize(crop, (cw * 3, ch * 3), interpolation=cv2.INTER_CUBIC)
+
+    # 2. Grayscale
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    gray = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)[1]
+
+    # 3. Adaptive threshold — handles uneven lighting better than fixed 150
+    gray = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31, 10
+    )
+
+    # 4. Sharpen — makes digit edges crisper so 0 and 8 are more distinct
+    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+    gray = cv2.filter2D(gray, -1, kernel)
 
     text = pytesseract.image_to_string(
         gray,
-        config="--psm 6 -c tessedit_char_whitelist=0123456789.,:-LatLon"
+        config="--psm 6 --oem 3 -c tessedit_char_whitelist=0123456789.,:-LatLon"
     )
 
     lat_match = re.search(r"Lat[:\s]*([0-9.,\-]+)", text)
