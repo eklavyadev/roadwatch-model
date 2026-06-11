@@ -5,3 +5,4 @@ uvicorn
 numpy
 python-multipart
 ultralytics
+modal
