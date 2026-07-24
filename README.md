@@ -1,6 +1,6 @@
 # RoadWatch Model — Pothole Detection API
 
-A FastAPI service that processes dashcam videos from GPS-enabled recorder apps, detects potholes using a YOLOv8 model, extracts GPS coordinates via OCR, and returns a deduplicated JSON list of pothole locations ready to plot on Google Maps.
+It is a FastAPI service that processes dashcam videos from GPS-enabled recorder apps, detects potholes using a YOLOv8 model, extracts GPS coordinates via OCR, and returns a deduplicated JSON list of pothole locations ready to plot on Google Maps.
 
 ---
 
